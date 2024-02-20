@@ -42,7 +42,7 @@ def scrape_book_details(book_url):
     if response.status_code == 200:
         soup = BeautifulSoup(response.text, 'html.parser')
 
-        # Modify the following code to extract book information from the current book page
+        #  Extract book information from the current book page
         book_title = soup.h1.text.strip()
         book_script = soup.find('div', class_='sub-header')
         book_description = book_script.find_next('p').text.strip()
@@ -66,7 +66,6 @@ def scrape_book_details(book_url):
         print(f"Image URL: {img_url}")
         print("\n")
 
-# Example usage
 base_url = 'https://books.toscrape.com/index.html'
 scrape_site(base_url)
 
