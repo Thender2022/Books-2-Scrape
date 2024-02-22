@@ -1,8 +1,8 @@
+import os
 import requests
 import csv
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
-
 
 def scrape_site(base_url):
     response = requests.get(base_url)
@@ -13,61 +13,310 @@ def scrape_site(base_url):
         # Find all the category links
         category_links = soup.find_all('a', href=lambda href: href and 'catalogue/category/books' in href)
 
-        for category_link in category_links:
+        # Create a main folder for the entire scraping session
+        main_folder = os.path.join(os.getcwd(), 'scraped_data')
+        os.makedirs(main_folder, exist_ok=True)
+
+        for category_link in category_links[1:]:  # Skip the first link as it's usually a non-category link
+            category_name = category_link.text.strip()
             relative_url = category_link['href']
             category_url = urljoin(base_url, relative_url)
+            category_folder = create_category_folder(category_name, main_folder)
             print("Category URL:", category_url)
 
-            scrape_category_books(category_url)
+            scrape_category_books(category_url, category_folder)
 
-def scrape_category_books(category_url):
-    response = requests.get(category_url)
+def create_category_folder(category_name, main_folder):
+    base_path = os.path.join(main_folder, 'categories')
+    category_folder = os.path.join(base_path, category_name)
+    os.makedirs(category_folder, exist_ok=True)
+    return category_folder
 
-    if response.status_code == 200:
-        soup = BeautifulSoup(response.text, 'html.parser')
+def scrape_category_books(category_url, category_folder):
+    while category_url:
+        response = requests.get(category_url)
 
-        # Find all the links to books in the current category
-        book_links = soup.find_all('h3')
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'html.parser')
 
-        for book_link in book_links:
-            relative_url = book_link.a['href']
-            book_url = urljoin(category_url, relative_url)
-            print("Book URL:", book_url)
+            # Find all the links to books in the current category
+            book_links = soup.find_all('h3')
 
-            scrape_book_details(book_url)
+            for book_link in book_links:
+                relative_url = book_link.a['href']
+                book_url = urljoin(category_url, relative_url)
+                print("Book URL:", book_url)
 
-def scrape_book_details(book_url):
+                book_data = scrape_book_details(book_url, category_folder)
+                if book_data:
+                    write_to_csv(book_data, category_folder)
+
+            next_button = soup.select_one('li.next > a')
+            if next_button:
+                category_url = urljoin(category_url, next_button['href'])
+            else:
+                category_url = None
+        else:
+            print("Failed to retrieve category page")
+            category_url = None
+
+def scrape_book_details(book_url, category_folder):
     response = requests.get(book_url)
 
     if response.status_code == 200:
         soup = BeautifulSoup(response.text, 'html.parser')
 
-        #  Extract book information from the current book page
+        # Extract book information
         book_title = soup.h1.text.strip()
-        book_script = soup.find('div', class_='sub-header')
-        book_description = book_script.find_next('p').text.strip()
-        tbody_elements = soup.table.find_all('tr')
-        tbody_list = list(tbody_elements)
-        upc = tbody_list[0].td.text.strip()
-        price_w_tax = tbody_list[2].td.text.strip()
-        price_no_tax = tbody_list[3].td.text.strip()
-        avail = tbody_list[5].td.text.strip()
-        rating_tag = soup.find('p', class_="star-rating")
-        rating = rating_tag['class'][1]
-        img_url = urljoin(book_url, soup.img['src'])
+        book_description = soup.select_one('meta[name="description"]')['content'].strip()
+        product_table = {row.th.text.strip(): row.td.text.strip() for row in soup.select('table.table.table-striped tr')}
+        upc = product_table.get('UPC')
+        price_incl_tax = product_table.get('Price (incl. tax)')
+        price_excl_tax = product_table.get('Price (excl. tax)')
+        availability = product_table.get('Availability')
+        rating = soup.find('p', class_='star-rating')['class'][1]
+        image_url = urljoin(book_url, soup.find('img')['src'])
 
-        print(f"Book Title: {book_title}")
-        print(f"Book Description: {book_description}")
-        print(f"UPC: {upc}")
-        print(f"Price (incl. tax): {price_w_tax}")
-        print(f"Price (excl. tax): {price_no_tax}")
-        print(f"Availability: {avail}")
-        print(f"Star Rating: {rating}")
-        print(f"Image URL: {img_url}")
-        print("\n")
+        image_filename = f'{book_title}.jpg'
+        image_path = os.path.join(category_folder, 'images', image_filename)
+        download_image(image_url, image_path)
+
+        return {
+            "Title": book_title,
+            "Description": book_description,
+            "UPC": upc,
+            "Price (incl. tax)": price_incl_tax,
+            "Price (excl. tax)": price_excl_tax,
+            "Availability": availability,
+            "Rating": rating,
+            "Image URL": image_path,
+        }
+
+def write_to_csv(book_data, category_folder):
+    csv_file_path = os.path.join(category_folder, 'books_data.csv')
+    file_exists = os.path.isfile(csv_file_path)
+
+    with open(csv_file_path, 'a', newline='', encoding='utf-8') as csv_file:
+        fieldnames = list(book_data.keys())
+        writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+
+        if not file_exists:
+            writer.writeheader()
+
+        writer.writerow(book_data)
+
+def download_image(image_url, image_path):
+    response = requests.get(image_url)
+
+    if response.status_code == 200:
+        # Create an 'images' folder within the category folder
+        images_folder = os.path.join(os.path.dirname(image_path), 'images')
+        os.makedirs(images_folder, exist_ok=True)
+
+        with open(image_path, 'wb') as image_file:
+            image_file.write(response.content)
+    else:
+        print(f"Failed to download image from {image_url}")
 
 base_url = 'https://books.toscrape.com/index.html'
 scrape_site(base_url)
+
+
+# def scrape_site(base_url):
+#     response = requests.get(base_url)
+#
+#     if response.status_code == 200:
+#         soup = BeautifulSoup(response.text, 'html.parser')
+#
+#         # Find all the category links
+#         category_links = soup.find_all('a', href=lambda href: href and 'catalogue/category/books' in href)
+#
+#         for category_link in category_links[1:]:  # Skip the first link as it's usually a non-category link
+#             category_name = category_link.text.strip()
+#             relative_url = category_link['href']
+#             category_url = urljoin(base_url, relative_url)
+#             category_folder = create_category_folder(category_name)
+#             print("Category URL:", category_url)
+#
+#             scrape_category_books(category_url, category_folder)
+#
+# def create_category_folder(category_name):
+#     base_path = os.path.join(os.getcwd(), 'categories')
+#     category_folder = os.path.join(base_path, category_name)
+#     os.makedirs(category_folder, exist_ok=True)
+#     return category_folder
+#
+# def scrape_category_books(category_url, category_folder):
+#     while category_url:
+#         response = requests.get(category_url)
+#
+#         if response.status_code == 200:
+#             soup = BeautifulSoup(response.text, 'html.parser')
+#
+#             # Find all the links to books in the current category
+#             book_links = soup.find_all('h3')
+#
+#             for book_link in book_links:
+#                 relative_url = book_link.a['href']
+#                 book_url = urljoin(category_url, relative_url)
+#                 print("Book URL:", book_url)
+#
+#                 book_data = scrape_book_details(book_url)
+#                 if book_data:
+#                     write_to_csv(book_data, category_folder)
+#
+#             next_button = soup.select_one('li.next > a')
+#             if next_button:
+#                 category_url = urljoin(category_url, next_button['href'])
+#             else:
+#                 category_url = None
+#         else:
+#             print("Failed to retrieve category page")
+#             category_url = None
+#
+# def scrape_book_details(book_url):
+#     response = requests.get(book_url)
+#
+#     if response.status_code == 200:
+#         soup = BeautifulSoup(response.text, 'html.parser')
+#
+#         # Extract book information
+#         book_title = soup.h1.text.strip()
+#         book_description = soup.select_one('meta[name="description"]')['content'].strip()
+#         product_table = {row.th.text.strip(): row.td.text.strip() for row in soup.select('table.table.table-striped tr')}
+#         upc = product_table.get('UPC')
+#         price_incl_tax = product_table.get('Price (incl. tax)')
+#         price_excl_tax = product_table.get('Price (excl. tax)')
+#         availability = product_table.get('Availability')
+#         rating = soup.find('p', class_='star-rating')['class'][1]
+#         image_url = urljoin(book_url, soup.find('img')['src'])
+#
+#
+#
+#         return {
+#             "Title": book_title,
+#             "Description": book_description,
+#             "UPC": upc,
+#             "Price (incl. tax)": price_incl_tax,
+#             "Price (excl. tax)": price_excl_tax,
+#             "Availability": availability,
+#             "Rating": rating,
+#             "Image URL": image_url,
+#         }
+#
+#
+# def write_to_csv(book_data, category_folder):
+#     csv_file_path = os.path.join(category_folder, 'books_data.csv')
+#     file_exists = os.path.isfile(csv_file_path)
+#
+#     with open(csv_file_path, 'a', newline='', encoding='utf-8') as csv_file:
+#         fieldnames = list(book_data.keys())
+#         writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+#
+#         if not file_exists:
+#             writer.writeheader()
+#
+#         writer.writerow(book_data)
+#
+# def download_image(image_url, image_path):
+#     response = requests.get(image_url)
+#
+#     if response.status_code == 200:
+#         with open(image_path, 'wb') as image_file:
+#             image_file.write(response.content)
+#     else:
+#         print(f"Failed to download image from {image_url}")
+#
+# base_url = 'https://books.toscrape.com/index.html'
+# scrape_site(base_url)
+
+
+# import requests
+# import os
+# import csv
+# from bs4 import BeautifulSoup
+# from urllib.parse import urljoin
+#
+#
+# def scrape_site(base_url):
+#     response = requests.get(base_url)
+#
+#     if response.status_code == 200:
+#         soup = BeautifulSoup(response.text, 'html.parser')
+#
+#         # Find all the category links
+#         category_links = soup.find_all('a', href=lambda href: href and 'catalogue/category/books' in href)
+#
+#         for category_link in category_links:
+#             relative_url = category_link['href']
+#             category_url = urljoin(base_url, relative_url)
+#             # category_name = category_link.text.strip()
+#
+#             # category_folder = os.path.join(os.getcwd(), category_name)
+#             # os.makedirs(category_folder, exist_ok=True)
+#
+#             print("Category URL:", category_url)
+#
+#             scrape_category_books(category_url)
+#
+# def scrape_category_books(category_url):
+#     response = requests.get(category_url)
+#
+#     if response.status_code == 200:
+#         soup = BeautifulSoup(response.text, 'html.parser')
+#
+#         # Find all the links to books in the current category
+#         book_links = soup.find_all('h3')
+#
+#         for book_link in book_links:
+#             relative_url = book_link.a['href']
+#             book_url = urljoin(category_url, relative_url)
+#             print("Book URL:", book_url)
+#
+#             scrape_book_details(book_url)
+#
+#         next_button = soup.select_one('li.next > a')
+#         if next_button:
+#             category_url = urljoin(category_url, next_button['href'])
+#         else:
+#             category_url = None  # No more pages in the category
+#     else:
+#         print("Failed to retrieve category page")
+#         category_url = None
+#
+#
+# def scrape_book_details(book_url):
+#     response = requests.get(book_url)
+#
+#     if response.status_code == 200:
+#         soup = BeautifulSoup(response.text, 'html.parser')
+#
+#         #  Extract book information from the current book page
+#         book_title = soup.h1.text.strip()
+#         book_script = soup.find('div', class_='sub-header')
+#         book_description = book_script.find_next('p').text.strip()
+#         tbody_elements = soup.table.find_all('tr')
+#         tbody_list = list(tbody_elements)
+#         upc = tbody_list[0].td.text.strip()
+#         price_w_tax = tbody_list[2].td.text.strip()
+#         price_no_tax = tbody_list[3].td.text.strip()
+#         avail = tbody_list[5].td.text.strip()
+#         rating_tag = soup.find('p', class_="star-rating")
+#         rating = rating_tag['class'][1]
+#         img_url = urljoin(book_url, soup.img['src'])
+#
+#         print(f"Book Title: {book_title}")
+#         print(f"Book Description: {book_description}")
+#         print(f"UPC: {upc}")
+#         print(f"Price (incl. tax): {price_w_tax}")
+#         print(f"Price (excl. tax): {price_no_tax}")
+#         print(f"Availability: {avail}")
+#         print(f"Star Rating: {rating}")
+#         print(f"Image URL: {img_url}")
+#         print("\n")
+#
+# base_url = 'https://books.toscrape.com/index.html'
+# scrape_site(base_url)
 
 
 # def scrape_site(base_url):
